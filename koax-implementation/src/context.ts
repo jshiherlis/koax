@@ -3,6 +3,7 @@ import { KoaXRequest } from './request';
 import { KoaXResponse } from './response';
 import { KoaXContext } from './types';
 import { KoaXApplication } from './application';
+import { Logger, generateRequestId } from './logger';
 
 /**
  * Context Pool Manager
@@ -81,6 +82,11 @@ export class Context implements KoaXContext {
   state: Record<string, any> = {};
   _inUse?: boolean;
 
+  // NEW: Logger and timing
+  log!: Logger;
+  requestId!: string;
+  startTime!: number;
+
   constructor(app: KoaXApplication, req: IncomingMessage, res: ServerResponse) {
     this.request = new KoaXRequest(req);
     this.response = new KoaXResponse(res);
@@ -98,6 +104,17 @@ export class Context implements KoaXContext {
     this.request.reset(req);
     this.response.reset(res);
     this.state = {};
+
+    // NEW: Initialize logger and timing for this request
+    this.requestId = generateRequestId();
+    this.startTime = Date.now();
+
+    // Create child logger with request context
+    this.log = app.logger.child({
+      reqId: this.requestId,
+      method: req.method,
+      url: req.url
+    });
   }
 
   // Delegated properties from request

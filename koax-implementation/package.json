@@ -7,7 +7,10 @@
   "scripts": {
     "build": "tsc",
     "dev": "ts-node examples/with-router.ts",
+    "dev:hooks": "ts-node examples/with-hooks.ts",
+    "dev:transports": "ts-node examples/with-transports.ts",
     "benchmark": "ts-node benchmarks/compare.ts",
+    "benchmark:hooks": "ts-node benchmarks/hooks-overhead.ts",
     "test": "node --test"
   },
   "keywords": ["koax", "koa", "middleware", "framework", "performance"],

@@ -1,7 +1,8 @@
 import { createServer, Server, IncomingMessage, ServerResponse } from 'http';
 import { EventEmitter } from 'events';
-import { Middleware, KoaXContext, KoaXOptions } from './types';
+import { Middleware, KoaXContext, KoaXOptions, HookFunction, ErrorHookFunction } from './types';
 import { ContextPool, Context } from './context';
+import { Logger, createLogger } from './logger';
 
 /**
  * KoaX Application
@@ -12,6 +13,11 @@ import { ContextPool, Context } from './context';
  * - Easier to debug and profile
  *
  * Context pooling reduces GC pressure and object allocation overhead
+ *
+ * NEW FEATURES:
+ * - Hooks system (onRequest, onResponse, onError)
+ * - Structured logging
+ * - Automatic request timing
  */
 export class KoaXApplication extends EventEmitter {
   private middleware: Middleware[] = [];
@@ -20,12 +26,33 @@ export class KoaXApplication extends EventEmitter {
   public proxy: boolean;
   public subdomainOffset: number;
 
+  // NEW: Logger
+  public logger: Logger;
+  private timingEnabled: boolean;
+
+  // NEW: Hooks inspired by Fastify
+  private requestHooks: HookFunction[] = [];
+  private responseHooks: HookFunction[] = [];
+  private errorHooks: ErrorHookFunction[] = [];
+
   constructor(options: KoaXOptions = {}) {
     super();
     this.env = options.env || process.env.NODE_ENV || 'development';
     this.proxy = options.proxy || false;
     this.subdomainOffset = options.subdomainOffset || 2;
     this.contextPool = new ContextPool(options.contextPoolSize || 1000);
+
+    // Initialize logger
+    this.logger = createLogger({
+      enabled: options.logger?.enabled ?? true,
+      level: options.logger?.level || 'info',
+      prettyPrint: options.logger?.prettyPrint ?? (this.env === 'development'),
+      name: options.logger?.name || 'koax',
+      transport: options.logger?.transport  // Pass custom transport if provided
+    });
+
+    // Enable timing by default
+    this.timingEnabled = options.timing ?? true;
   }
 
   /**
@@ -36,6 +63,50 @@ export class KoaXApplication extends EventEmitter {
       throw new TypeError('Middleware must be a function');
     }
     this.middleware.push(fn);
+    return this;
+  }
+
+  /**
+   * Register onRequest hook
+   * Executed before any middleware, perfect for logging, authentication checks
+   *
+   * @param fn - Hook function to execute
+   */
+  onRequest(fn: HookFunction): this {
+    if (typeof fn !== 'function') {
+      throw new TypeError('Hook must be a function');
+    }
+    this.requestHooks.push(fn);
+    return this;
+  }
+
+  /**
+   * Register onResponse hook
+   * Executed after all middleware, before sending response
+   * Perfect for logging response times, cleanup, metrics
+   *
+   * @param fn - Hook function to execute
+   */
+  onResponse(fn: HookFunction): this {
+    if (typeof fn !== 'function') {
+      throw new TypeError('Hook must be a function');
+    }
+    this.responseHooks.push(fn);
+    return this;
+  }
+
+  /**
+   * Register onError hook
+   * Executed when an error occurs
+   * Perfect for error logging, monitoring, alerting
+   *
+   * @param fn - Error hook function to execute
+   */
+  onError(fn: ErrorHookFunction): this {
+    if (typeof fn !== 'function') {
+      throw new TypeError('Hook must be a function');
+    }
+    this.errorHooks.push(fn);
     return this;
   }
 
@@ -61,20 +132,57 @@ export class KoaXApplication extends EventEmitter {
   /**
    * Handle incoming request
    * OPTIMIZATION: Uses context pool to reuse objects
+   * NEW: Executes hooks and automatic timing
    */
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const ctx = this.contextPool.acquire(this, req, res);
 
     try {
+      // Execute onRequest hooks
+      await this.executeRequestHooks(ctx);
+
+      // Execute middleware chain
       await this.executeMiddleware(ctx);
+
+      // Execute onResponse hooks
+      await this.executeResponseHooks(ctx);
+
+      // Log request if timing is enabled
+      if (this.timingEnabled) {
+        const duration = Date.now() - ctx.startTime;
+        ctx.log.info(`Request completed`, {
+          status: ctx.status,
+          duration: `${duration}ms`
+        });
+      }
+
+      // Send response
       this.respond(ctx);
     } catch (err) {
-      this.handleError(err, ctx);
+      await this.handleError(err, ctx);
     } finally {
       // Return context to pool after response is sent
       res.on('finish', () => {
         this.contextPool.release(ctx);
       });
+    }
+  }
+
+  /**
+   * Execute onRequest hooks
+   */
+  private async executeRequestHooks(ctx: KoaXContext): Promise<void> {
+    for (const hook of this.requestHooks) {
+      await hook(ctx);
+    }
+  }
+
+  /**
+   * Execute onResponse hooks
+   */
+  private async executeResponseHooks(ctx: KoaXContext): Promise<void> {
+    for (const hook of this.responseHooks) {
+      await hook(ctx);
     }
   }
 
@@ -144,10 +252,24 @@ export class KoaXApplication extends EventEmitter {
 
   /**
    * Handle errors
+   * NEW: Executes error hooks and logs errors
    */
-  private handleError(err: any, ctx: KoaXContext): void {
+  private async handleError(err: any, ctx: KoaXContext): Promise<void> {
     const status = err.status || err.statusCode || 500;
     const message = err.expose ? err.message : 'Internal Server Error';
+
+    // Log error with context
+    ctx.log.error(err, `Request failed`);
+
+    // Execute error hooks
+    try {
+      for (const hook of this.errorHooks) {
+        await hook(err, ctx);
+      }
+    } catch (hookErr) {
+      // Don't let hook errors crash the app
+      this.logger.error(hookErr as Error, 'Error in error hook');
+    }
 
     ctx.status = status;
     ctx.body = { error: message };
